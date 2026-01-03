@@ -10,3 +10,6 @@ __pycache__/
 # Sistema
 .DS_Store
 
+# Llaves y credenciales
+*.pem
+
