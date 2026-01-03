@@ -1,0 +1,12 @@
+# Archivos generados
+torrents/
+descargas/
+archivos/
+
+# Python
+__pycache__/
+*.pyc
+
+# Sistema
+.DS_Store
+
