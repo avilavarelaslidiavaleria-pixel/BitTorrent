@@ -80,7 +80,7 @@ def anunciar_tracker(ip_t, mi_p):
         msg = {
             "tipo": "REGISTRO",
             "puerto": mi_p,
-            "ip_local": MI_IP_LOCAL, # Reportamos IP local para que otros nos vean
+            # "ip_local": MI_IP_LOCAL, # Reportamos IP local para que otros nos vean
             "archivos_compartidos": archivos_compartiendo,
             "progreso": progreso_por_archivo,
             "total_fragmentos": total_fragmentos_por_archivo
