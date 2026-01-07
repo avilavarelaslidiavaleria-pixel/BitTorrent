@@ -234,8 +234,6 @@
 #         while True: anunciar_tracker(ip_tracker, puerto); time.sleep(10)
 #     threading.Thread(target=heartbeat, daemon=True).start()
 # #     menu(ip_tracker, puerto)
-
-
 import os, json, math, socket, threading, time, hashlib
 from rich.progress import Progress
 from rich.console import Console
@@ -246,7 +244,7 @@ console = Console()
 CARPETA_ORIGINALES = "archivos"
 CARPETA_METADATOS = "torrents"
 CARPETA_DESCARGAS = "descargas"
-TAMANO_PIEZA = 512 * 1024 # 512 KB por pieza
+TAMANO_PIEZA = 512 * 1024  # 512 KB
 
 # Asegurar directorios
 for c in [CARPETA_ORIGINALES, CARPETA_METADATOS, CARPETA_DESCARGAS]:
@@ -256,17 +254,24 @@ archivos_compartiendo = []
 progreso_por_archivo = {}
 total_fragmentos_por_archivo = {}
 
-# --- TRANSPARENCIA: Detectar IP de Tailscale ---
+# --- TRANSPARENCIA: Detección Automática de Tailscale ---
 def obtener_mi_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(('8.8.8.8', 80))
+        # Intenta obtener la IP que empieza con 100 (Tailscale)
+        interfaces = socket.getaddrinfo(socket.gethostname(), None)
+        for res in interfaces:
+            ip = res[4][0]
+            if ip.startswith("100."):
+                return ip
+        
+        # Método alternativo si el anterior falla
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('100.100.100.100', 80))
         ip = s.getsockname()[0]
-    except:
-        ip = '127.0.0.1'
-    finally:
         s.close()
-    return ip
+        return ip
+    except:
+        return "127.0.0.1"
 
 MI_IP_LOCAL = obtener_mi_ip()
 
@@ -300,7 +305,7 @@ def servidor_de_piezas(puerto):
     s.listen(10)
     while True:
         conn, _ = s.accept()
-        # Hilos para atender múltiples peticiones simultáneas
+        # Hilos para atención simultánea
         threading.Thread(target=atender_cliente, args=(conn,), daemon=True).start()
 
 # ================= COMUNICACIÓN CON TRACKER =================
@@ -334,11 +339,10 @@ def buscar_fuentes(ip_t, nombre):
         return res
     except: return []
 
-# ================= DESCARGA (MULTIFUENTE Y TOLERANCIA A FALLOS) =================
+# ================= DESCARGA (TOLERANCIA A FALLOS) =================
 def descargar(ip_t, fuentes, nombre, total_piezas, mi_p):
     ruta = os.path.join(CARPETA_DESCARGAS, f"descargado_{nombre}")
     
-    # TOLERANCIA A FALLOS: Reanudar si ya hay progreso
     pieza_inicial = 0
     if os.path.exists(ruta):
         pieza_inicial = os.path.getsize(ruta) // TAMANO_PIEZA
@@ -366,11 +370,10 @@ def descargar(ip_t, fuentes, nombre, total_piezas, mi_p):
                     
                     if data:
                         f.write(data); prog.update(tarea, advance=1)
-                        porcentaje = int(((i + 1) / total_piezas) * 100)
-                        progreso_por_archivo[nombre] = porcentaje
+                        progreso_por_archivo[nombre] = int(((i + 1) / total_piezas) * 100)
 
                         # REGLA DEL 20%
-                        if porcentaje >= 20 and nombre not in archivos_compartiendo:
+                        if progreso_por_archivo[nombre] >= 20 and nombre not in archivos_compartiendo:
                             archivos_compartiendo.append(nombre)
                             anunciar_tracker(ip_t, mi_p)
                     c.close()
@@ -392,7 +395,7 @@ def menu(ip_t, mi_p):
                 tamano_total = os.path.getsize(ruta)
                 total = math.ceil(tamano_total / TAMANO_PIEZA)
                 
-                # Generar Metadatos (.json)
+                # Generar .json de Metadatos
                 hashes = []
                 with open(ruta, "rb") as f:
                     for _ in range(total):
@@ -417,13 +420,13 @@ def menu(ip_t, mi_p):
 
         elif op == "2":
             lista = pedir_lista(ip_t)
-            print("Disponibles:", lista)
+            print("Enjambre disponible:", lista)
             n = input("Archivo: ")
             fuentes = buscar_fuentes(ip_t, n)
             if fuentes:
                 total = fuentes[0].get('total_fragmentos', 0)
                 if total > 0: descargar(ip_t, fuentes, n, total, mi_p)
-            else: console.print("[red]No hay fuentes disponibles.[/red]")
+            else: console.print("[red]No hay fuentes (Seeders o Leechers > 20%).[/red]")
 
         elif op == "3": os._exit(0)
 
@@ -431,7 +434,10 @@ if __name__ == "__main__":
     ip_tracker = input("IP Tracker: ")
     puerto = int(input("Mi puerto: "))
     threading.Thread(target=servidor_de_piezas, args=(puerto,), daemon=True).start()
+    
+    # Heartbeat cada 5 segundos para que la tabla sea fluida
     def heartbeat():
-        while True: anunciar_tracker(ip_tracker, puerto); time.sleep(10)
+        while True: anunciar_tracker(ip_tracker, puerto); time.sleep(5)
     threading.Thread(target=heartbeat, daemon=True).start()
+    
     menu(ip_tracker, puerto)

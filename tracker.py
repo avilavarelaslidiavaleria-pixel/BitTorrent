@@ -69,41 +69,39 @@
 import socket, threading, json, time
 from rich.console import Console
 from rich.table import Table
-from rich.live import Live
 
 # ================= CONFIGURACIÓN =================
-TIEMPO_LIMITE = 15  # Segundos para limpiar nodos offline
+TIEMPO_LIMITE = 20  # Más tiempo para que no desaparezcan tan rápido
 PUERTO_TRACKER = 6000
 nodos_activos = {}
 lock = threading.Lock()
 console = Console()
 
-def generar_tabla():
-    """Genera la tabla visual con columnas de Estado y Progreso"""
-    table = Table(title=f"📡 ENJAMBRE BITTORRENT - {time.strftime('%H:%M:%S')}", header_style="bold magenta")
-    table.add_column("PEER (IP:PUERTO)", style="cyan", no_wrap=True)
-    table.add_column("ESTADO", justify="center")
-    table.add_column("PROGRESO", style="green")
+def mostrar_estado_red():
+    """Genera e imprime la tabla en el historial"""
+    ahora = time.strftime('%H:%M:%S')
+    table = Table(title=f"📊 ESTADO DEL ENJAMBRE - {ahora}", header_style="bold magenta")
+    table.add_column("PEER (IP:PUERTO)", style="cyan")
+    table.add_column("ESTADO", justify="center") 
+    table.add_column("PROGRESO REAL", style="green")
     table.add_column("ARCHIVOS COMPARTIENDO", style="yellow")
     
     with lock:
-        # TOLERANCIA A FALLOS: Limpiar los que ya no mandan registro
-        ahora = time.time()
-        nodos_muertos = [nid for nid, info in nodos_activos.items() if ahora - info["ultima_vez"] > TIEMPO_LIMITE]
-        for nid in nodos_muertos:
+        # AUTO-LIMPIEZA: Solo borramos si de verdad ya no hay señal
+        limite = time.time() - TIEMPO_LIMITE
+        muertos = [nid for nid, info in nodos_activos.items() if info["ultima_vez"] < limite]
+        for nid in muertos:
             del nodos_activos[nid]
+            console.print(f"[bold red][!] Nodo {nid} desconectado (Timeout)[/bold red]")
 
         for nid, info in nodos_activos.items():
-            # Determinar Seeder o Leecher
-            prog_dict = info.get("progreso", {})
-            estado = "[bold green]Seeder[/bold green]" if all(p == 100 for p in prog_dict.values()) and prog_dict else "[bold yellow]Leecher[/bold yellow]"
-            if not prog_dict: estado = "[bold red]Inactivo[/bold red]"
-            
-            prog_texto = ", ".join([f"{a}:{p}%" for a, p in prog_dict.items()])
-            arch_texto = ", ".join(info.get("archivos_compartidos", []))
-            
-            table.add_row(nid, estado, prog_texto or "0%", arch_texto or "Ninguno")
-    return table
+            prog = info.get("progreso", {})
+            estado = "[bold green]SEEDER[/bold green]" if all(p == 100 for p in prog.values()) and prog else "[bold yellow]LEECHER[/bold yellow]"
+            prog_txt = ", ".join([f"{a}:{p}%" for a, p in prog.items()])
+            arch_txt = ", ".join(info.get("archivos_compartidos", []))
+            table.add_row(nid, estado, prog_txt or "0%", arch_txt or "Ninguno")
+    
+    console.print(table)
 
 def manejar_nodo(conn, addr):
     try:
@@ -112,16 +110,28 @@ def manejar_nodo(conn, addr):
         msg = json.loads(data)
         
         if msg.get("tipo") == "REGISTRO":
-            # TRANSPARENCIA: Usar la IP reportada (Tailscale)
+            # PRIORIDAD: Usar la IP que el nodo reporta como local (Tailscale)
             ip_a_usar = msg.get("ip_local", addr[0])
             nid = f"{ip_a_usar}:{msg['puerto']}"
+            
             with lock:
+                nuevo = nid not in nodos_activos
                 nodos_activos[nid] = {
+                    "ip": ip_a_usar, "puerto": msg["puerto"],
                     "progreso": msg.get("progreso", {}),
                     "archivos_compartidos": msg.get("archivos_compartidos", []),
                     "ultima_vez": time.time()
                 }
-        # ... (puedes añadir BUSQUEDA y LISTAR_TODO aquí)
+            
+            if nuevo: console.print(f"[bold blue][+] Nuevo nodo en la red: {nid}[/bold blue]")
+            mostrar_estado_red() # Se imprime la tabla nueva sin borrar la anterior
+
+        elif msg.get("tipo") == "BUSQUEDA":
+            archivo = msg.get("archivo")
+            with lock:
+                encontrados = [{"ip": info["ip"], "puerto": info["puerto"], "total_fragmentos": info.get("total_fragmentos", {}).get(archivo, 0)} 
+                               for info in nodos_activos.values() if info["progreso"].get(archivo, 0) >= 20]
+            conn.send(json.dumps(encontrados).encode("utf-8"))
     except: pass
     finally: conn.close()
 
@@ -130,15 +140,9 @@ def iniciar_tracker():
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", PUERTO_TRACKER))
     s.listen()
-    
-    # LIVE DISPLAY: Esto hace que la tabla se actualice sin llenar la terminal de texto
-    with Live(generar_tabla(), refresh_per_second=1, console=console) as live:
-        while True:
-            s.settimeout(1)
-            try:
-                c, a = s.accept()
-                threading.Thread(target=manejar_nodo, args=(c, a), daemon=True).start()
-            except socket.timeout: pass
-            live.update(generar_tabla())
+    console.print(f"[bold green]✔ TRACKER GLOBAL LISTO EN PUERTO {PUERTO_TRACKER}[/bold green]")
+    while True:
+        c, a = s.accept()
+        threading.Thread(target=manejar_nodo, args=(c, a), daemon=True).start()
 
 if __name__ == "__main__": iniciar_tracker()
