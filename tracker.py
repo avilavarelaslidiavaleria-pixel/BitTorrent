@@ -125,6 +125,105 @@
 # if __name__ == "__main__":
 #     iniciar_tracker()
 
+# import socket, threading, json, time
+# from rich.console import Console
+# from rich.table import Table
+
+# PUERTO_TRACKER = 6000
+# nodos_activos = {}
+# console = Console()
+
+# def mostrar_estado_red():
+#     """Limpia la pantalla y dibuja la tabla con los nodos actuales."""
+#     console.clear() # Esto evita que se repita el texto hacia abajo
+    
+#     ahora = time.strftime('%H:%M:%S')
+#     table = Table(
+#         title=f"[bold magenta]ENJAMBRE BITTORRENT GLOBAL[/bold magenta] - {ahora}", 
+#         header_style="bold cyan",
+#         border_style="bright_blue"
+#     )
+    
+#     table.add_column("PEER ID (IP:PORT)", style="cyan", justify="center")
+#     table.add_column("IP LOCAL", style="green", justify="center")
+#     table.add_column("PROGRESO POR ARCHIVO", style="yellow")
+#     table.add_column("ESTADO", justify="center")
+
+#     for nid, info in nodos_activos.items():
+#         # Formatear el progreso: "archivo.mp4: 100%"
+#         prog_detalles = []
+#         estado = "[bold green]SEEDER[/bold green]" # Asumimos seeder por defecto
+        
+#         for arc, p in info["progreso"].items():
+#             prog_detalles.append(f"{arc}: {p}%")
+#             if p < 100:
+#                 estado = "[bold blue]LEECHER[/bold blue]"
+        
+#         prog_str = "\n".join(prog_detalles) if prog_detalles else "Esperando..."
+        
+#         table.add_row(
+#             nid, 
+#             info["ip_privada"], 
+#             prog_str, 
+#             estado
+#         )
+    
+#     console.print(table)
+
+# def manejar_nodo(conn, addr):
+#     try:
+#         data = conn.recv(8192).decode("utf-8")
+#         if not data: return
+#         msg = json.loads(data)
+#         tipo = msg.get("tipo")
+
+#         if tipo == "REGISTRO":
+#             # Guardamos la IP que detecta el socket (pública) y la que reporta el nodo (privada)
+#             ip_publica = addr[0]
+#             ip_privada = msg.get("ip_local", "N/A")
+#             puerto = msg.get("puerto")
+            
+#             # El ID único será IP_PUBLICA:PUERTO para no confundir nodos de distintas casas
+#             nid = f"{ip_publica}:{puerto}"
+            
+#             nodos_activos[nid] = {
+#                 "ip_privada": ip_privada,
+#                 "puerto": puerto,
+#                 "progreso": msg.get("progreso", {}),
+#                 "total_fragmentos": msg.get("total_fragmentos", {}),
+#                 "ultima_vez": time.time()
+#             }
+#             mostrar_estado_red()
+
+#         elif tipo == "BUSQUEDA":
+#             archivo = msg.get("archivo")
+#             # Devolvemos la IP local si están en la misma red, o la pública si no
+#             encontrados = [{"ip": info["ip_privada"], "puerto": info["puerto"], "total_fragmentos": info.get("total_fragmentos", {}).get(archivo, 0)} 
+#                            for info in nodos_activos.values() if info["progreso"].get(archivo, 0) >= 20]
+#             conn.send(json.dumps(encontrados).encode("utf-8"))
+
+#         elif tipo == "LISTAR_TODO":
+#             archivos = list(set(a for info in nodos_activos.values() for a in info["progreso"].keys()))
+#             conn.send(json.dumps(archivos).encode("utf-8"))
+#     except:
+#         pass
+#     finally:
+#         conn.close()
+
+# def iniciar_tracker():
+#     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+#     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+#     s.bind(("0.0.0.0", PUERTO_TRACKER))
+#     s.listen()
+#     console.print(f"[bold green]✔ TRACKER GLOBAL LISTO EN PUERTO {PUERTO_TRACKER}[/bold green]")
+    
+#     while True:
+#         c, a = s.accept()
+#         threading.Thread(target=manejar_nodo, args=(c, a), daemon=True).start()
+
+# if __name__ == "__main__":
+#     iniciar_tracker()
+
 import socket, threading, json, time
 from rich.console import Console
 from rich.table import Table
@@ -135,7 +234,7 @@ console = Console()
 
 def mostrar_estado_red():
     """Limpia la pantalla y dibuja la tabla con los nodos actuales."""
-    console.clear() # Esto evita que se repita el texto hacia abajo
+    console.clear()
     
     ahora = time.strftime('%H:%M:%S')
     table = Table(
@@ -144,22 +243,22 @@ def mostrar_estado_red():
         border_style="bright_blue"
     )
     
-    table.add_column("PEER ID (IP:PORT)", style="cyan", justify="center")
+    table.add_column("PEER ID (PÚBLICO)", style="cyan", justify="center")
     table.add_column("IP LOCAL", style="green", justify="center")
     table.add_column("PROGRESO POR ARCHIVO", style="yellow")
     table.add_column("ESTADO", justify="center")
 
     for nid, info in nodos_activos.items():
-        # Formatear el progreso: "archivo.mp4: 100%"
         prog_detalles = []
-        estado = "[bold green]SEEDER[/bold green]" # Asumimos seeder por defecto
+        # Asumimos SEEDER si todos los archivos están al 100%
+        estado = "[bold green]SEEDER[/bold green]"
         
         for arc, p in info["progreso"].items():
             prog_detalles.append(f"{arc}: {p}%")
             if p < 100:
                 estado = "[bold blue]LEECHER[/bold blue]"
         
-        prog_str = "\n".join(prog_detalles) if prog_detalles else "Esperando..."
+        prog_str = "\n".join(prog_detalles) if prog_detalles else "Conectado"
         
         table.add_row(
             nid, 
@@ -172,21 +271,21 @@ def mostrar_estado_red():
 
 def manejar_nodo(conn, addr):
     try:
-        data = conn.recv(8192).decode("utf-8")
+        # Aumentamos un poco el buffer por si hay muchos archivos
+        data = conn.recv(16384).decode("utf-8")
         if not data: return
         msg = json.loads(data)
         tipo = msg.get("tipo")
 
         if tipo == "REGISTRO":
-            # Guardamos la IP que detecta el socket (pública) y la que reporta el nodo (privada)
             ip_publica = addr[0]
+            # Extraemos la IP local que envía el nodo
             ip_privada = msg.get("ip_local", "N/A")
             puerto = msg.get("puerto")
-            
-            # El ID único será IP_PUBLICA:PUERTO para no confundir nodos de distintas casas
             nid = f"{ip_publica}:{puerto}"
             
             nodos_activos[nid] = {
+                "ip_publica": ip_publica,
                 "ip_privada": ip_privada,
                 "puerto": puerto,
                 "progreso": msg.get("progreso", {}),
@@ -198,8 +297,15 @@ def manejar_nodo(conn, addr):
         elif tipo == "BUSQUEDA":
             archivo = msg.get("archivo")
             # Devolvemos la IP local si están en la misma red, o la pública si no
-            encontrados = [{"ip": info["ip_privada"], "puerto": info["puerto"], "total_fragmentos": info.get("total_fragmentos", {}).get(archivo, 0)} 
-                           for info in nodos_activos.values() if info["progreso"].get(archivo, 0) >= 20]
+            # IMPORTANTE: Aquí enviamos 'ip_privada' porque en LAN es la única que conecta
+            encontrados = []
+            for info in nodos_activos.values():
+                if info["progreso"].get(archivo, 0) >= 0: # Enviamos a todos los que tengan algo o estén compartiendo
+                    encontrados.append({
+                        "ip": info["ip_privada"], 
+                        "puerto": info["puerto"],
+                        "total_fragmentos": info.get("total_fragmentos", {}).get(archivo, 0)
+                    })
             conn.send(json.dumps(encontrados).encode("utf-8"))
 
         elif tipo == "LISTAR_TODO":
@@ -215,11 +321,12 @@ def iniciar_tracker():
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", PUERTO_TRACKER))
     s.listen()
-    console.print(f"[bold green]✔ TRACKER GLOBAL LISTO EN PUERTO {PUERTO_TRACKER}[/bold green]")
+    console.print(Panel(f"[bold green]✔ TRACKER GLOBAL LISTO EN PUERTO {PUERTO_TRACKER}[/bold green]\nEsperando conexiones de nodos..."))
     
     while True:
         c, a = s.accept()
         threading.Thread(target=manejar_nodo, args=(c, a), daemon=True).start()
 
 if __name__ == "__main__":
+    from rich.panel import Panel
     iniciar_tracker()
