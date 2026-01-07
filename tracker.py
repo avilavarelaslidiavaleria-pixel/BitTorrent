@@ -20,8 +20,6 @@ def mostrar_estado_red():
     console.print(table)
 
 def manejar_nodo(conn, addr):
-    print("Nodo conectado desde:", addr)
-
     try:
         data = conn.recv(4096).decode("utf-8")
         if not data: return
@@ -30,8 +28,7 @@ def manejar_nodo(conn, addr):
 
         if tipo == "REGISTRO":
             # PRIORIDAD: Usar la IP local que reporta el nodo para evitar el NAT Loopback
-            # ip_a_usar = msg.get("ip_local", addr[0])
-            ip_a_usar = addr[0]   # SIEMPRE la IP vista por el tracker
+            ip_a_usar = msg.get("ip_local", addr[0])
             nid = f"{ip_a_usar}:{msg['puerto']}"
             nodos_activos[nid] = {
                 "ip": ip_a_usar, "puerto": msg["puerto"],
