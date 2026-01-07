@@ -234,6 +234,7 @@
 #         while True: anunciar_tracker(ip_tracker, puerto); time.sleep(10)
 #     threading.Thread(target=heartbeat, daemon=True).start()
 # #     menu(ip_tracker, puerto)
+
 import os, json, math, socket, threading, time, hashlib
 from rich.progress import Progress
 from rich.console import Console
@@ -244,57 +245,53 @@ console = Console()
 CARPETA_ORIGINALES = "archivos"
 CARPETA_METADATOS = "torrents"
 CARPETA_DESCARGAS = "descargas"
-TAMANO_PIEZA = 512 * 1024  # 512 KB
+TAMANO_PIEZA = 512 * 1024 
 
-# Asegurar directorios
+# Asegurar que existan las carpetas
 for c in [CARPETA_ORIGINALES, CARPETA_METADATOS, CARPETA_DESCARGAS]:
     os.makedirs(c, exist_ok=True)
 
-archivos_compartiendo = []
-progreso_por_archivo = {}
-total_fragmentos_por_archivo = {}
+archivos_compartiendo, progreso_por_archivo, total_fragmentos_por_archivo = [], {}, {}
 
-# --- TRANSPARENCIA: Detección Automática de Tailscale ---
 def obtener_mi_ip():
+    """Detecta la IP de Tailscale (100.x.x.x) para Transparencia"""
     try:
-        # Intenta obtener la IP que empieza con 100 (Tailscale)
-        interfaces = socket.getaddrinfo(socket.gethostname(), None)
-        for res in interfaces:
-            ip = res[4][0]
-            if ip.startswith("100."):
-                return ip
-        
-        # Método alternativo si el anterior falla
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(('100.100.100.100', 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except:
-        return "127.0.0.1"
+    except: return "127.0.0.1"
 
 MI_IP_LOCAL = obtener_mi_ip()
 
-# ================= SERVIDOR DE PIEZAS (CONCURRENCIA) =================
+# ================= COMUNICACIÓN Y SERVIDOR =================
+def anunciar_tracker(ip_t, mi_p):
+    try:
+        s = socket.socket(); s.settimeout(2); s.connect((ip_t, 6000))
+        msg = {
+            "tipo": "REGISTRO", "puerto": mi_p, "ip_local": MI_IP_LOCAL,
+            "archivos_compartidos": archivos_compartiendo,
+            "progreso": progreso_por_archivo,
+            "total_fragmentos": total_fragmentos_por_archivo
+        }
+        s.send(json.dumps(msg).encode()); s.close()
+    except: pass
+
 def atender_cliente(conn):
     try:
         data = conn.recv(1024).decode()
         if not data: return
         pet = json.loads(data)
-
         if pet["tipo"] == "PEDIR_PIEZA":
-            nombre = pet["archivo"]
-            num = pet["num_pieza"]
-            ruta1 = os.path.join(CARPETA_ORIGINALES, nombre)
-            ruta2 = os.path.join(CARPETA_DESCARGAS, f"descargado_{nombre}")
-            ruta = ruta1 if os.path.exists(ruta1) else ruta2
-
+            nombre, num = pet["archivo"], pet["num_pieza"]
+            r1, r2 = os.path.join(CARPETA_ORIGINALES, nombre), os.path.join(CARPETA_DESCARGAS, f"descargado_{nombre}")
+            ruta = r1 if os.path.exists(r1) else r2
             if os.path.exists(ruta):
                 with open(ruta, "rb") as f:
                     f.seek(num * TAMANO_PIEZA)
                     contenido = f.read(TAMANO_PIEZA)
-                    conn.sendall(len(contenido).to_bytes(4, byteorder='big')) 
-                    conn.sendall(contenido)
+                    conn.sendall(len(contenido).to_bytes(4, byteorder='big') + contenido)
     except: pass
     finally: conn.close()
 
@@ -305,139 +302,96 @@ def servidor_de_piezas(puerto):
     s.listen(10)
     while True:
         conn, _ = s.accept()
-        # Hilos para atención simultánea
         threading.Thread(target=atender_cliente, args=(conn,), daemon=True).start()
 
-# ================= COMUNICACIÓN CON TRACKER =================
-def anunciar_tracker(ip_t, mi_p):
-    try:
-        s = socket.socket(); s.settimeout(2); s.connect((ip_t, 6000))
-        msg = {
-            "tipo": "REGISTRO",
-            "puerto": mi_p,
-            "ip_local": MI_IP_LOCAL,
-            "archivos_compartidos": archivos_compartiendo,
-            "progreso": progreso_por_archivo,
-            "total_fragmentos": total_fragmentos_por_archivo
-        }
-        s.send(json.dumps(msg).encode()); s.close()
-    except: pass
-
+# ================= DESCARGA Y BUSQUEDA =================
 def pedir_lista(ip_t):
     try:
-        s = socket.socket(); s.connect((ip_t, 6000))
+        s = socket.socket(); s.settimeout(2); s.connect((ip_t, 6000))
         s.send(json.dumps({"tipo": "LISTAR_TODO"}).encode())
-        res = json.loads(s.recv(4096).decode()); s.close()
-        return res
+        res = s.recv(4096).decode()
+        s.close()
+        return json.loads(res) if res else []
     except: return []
 
-def buscar_fuentes(ip_t, nombre):
+def buscar_fuentes(ip_t, n):
     try:
         s = socket.socket(); s.connect((ip_t, 6000))
-        s.send(json.dumps({"tipo": "BUSQUEDA", "archivo": nombre}).encode())
+        s.send(json.dumps({"tipo": "BUSQUEDA", "archivo": n}).encode())
         res = json.loads(s.recv(4096).decode()); s.close()
         return res
     except: return []
 
-# ================= DESCARGA (TOLERANCIA A FALLOS) =================
 def descargar(ip_t, fuentes, nombre, total_piezas, mi_p):
     ruta = os.path.join(CARPETA_DESCARGAS, f"descargado_{nombre}")
-    
-    pieza_inicial = 0
-    if os.path.exists(ruta):
-        pieza_inicial = os.path.getsize(ruta) // TAMANO_PIEZA
-        console.print(f"[yellow]¡REANUDANDO! {nombre} desde pieza {pieza_inicial}[/yellow]")
-
+    pieza_ini = os.path.getsize(ruta) // TAMANO_PIEZA if os.path.exists(ruta) else 0
     with Progress() as prog:
-        tarea = prog.add_task(f"[cyan]Descargando {nombre}", total=total_piezas, completed=pieza_inicial)
-        
-        with open(ruta, "ab" if pieza_inicial > 0 else "wb") as f:
-            for i in range(pieza_inicial, total_piezas):
-                fuente = fuentes[i % len(fuentes)] # Multifuente
+        t = prog.add_task(f"[cyan]Descargando {nombre}", total=total_piezas, completed=pieza_ini)
+        with open(ruta, "ab" if pieza_ini > 0 else "wb") as f:
+            for i in range(pieza_ini, total_piezas):
+                fuente = fuentes[i % len(fuentes)]
                 try:
-                    c = socket.socket(); c.settimeout(10); c.connect((fuente["ip"], fuente["puerto"]))
-                    c.send(json.dumps({"tipo": "PEDIR_PIEZA", "archivo": nombre, "num_pieza": i}).encode())
-
-                    header = c.recv(4)
-                    if not header: break
-                    tam_real = int.from_bytes(header, byteorder='big')
-
+                    c = socket.socket(); c.settimeout(5); c.connect((fuente["ip"], fuente["puerto"]))
+                    c.send(json.dumps({"tipo":"PEDIR_PIEZA","archivo":nombre,"num_pieza":i}).encode())
+                    tam = int.from_bytes(c.recv(4), byteorder='big')
                     data = b''
-                    while len(data) < tam_real:
-                        chunk = c.recv(tam_real - len(data))
-                        if not chunk: break
-                        data += chunk
-                    
+                    while len(data) < tam: data += c.recv(tam - len(data))
                     if data:
-                        f.write(data); prog.update(tarea, advance=1)
+                        f.write(data); prog.update(t, advance=1)
                         progreso_por_archivo[nombre] = int(((i + 1) / total_piezas) * 100)
-
-                        # REGLA DEL 20%
                         if progreso_por_archivo[nombre] >= 20 and nombre not in archivos_compartiendo:
-                            archivos_compartiendo.append(nombre)
-                            anunciar_tracker(ip_t, mi_p)
+                            archivos_compartiendo.append(nombre); anunciar_tracker(ip_t, mi_p)
                     c.close()
                 except: continue
+    console.print(f"[bold green]✔ {nombre} completo[/bold green]")
 
-    console.print(f"[bold green]✔ {nombre} guardado correctamente[/bold green]")
-
-# ================= MENÚ =================
+# ================= MENÚ CON GENERACIÓN DE JSON =================
 def menu(ip_t, mi_p):
     while True:
         console.print(Panel(f"NODO {MI_IP_LOCAL} | Puerto {mi_p} | Tracker {ip_t}"))
-        print("1. Compartir archivo\n2. Descargar archivo\n3. Salir")
-        op = input("> ")
-
+        op = input("1. Compartir\n2. Descargar\n3. Salir\n> ")
         if op == "1":
             n = input("Archivo en /archivos: ")
             ruta = os.path.join(CARPETA_ORIGINALES, n)
             if os.path.exists(ruta):
+                # ===== LÓGICA DE CREACIÓN DE JSON (TORRENT) =====
                 tamano_total = os.path.getsize(ruta)
                 total = math.ceil(tamano_total / TAMANO_PIEZA)
-                
-                # Generar .json de Metadatos
                 hashes = []
                 with open(ruta, "rb") as f:
                     for _ in range(total):
                         pieza = f.read(TAMANO_PIEZA)
                         hashes.append(hashlib.sha1(pieza).hexdigest())
 
-                datos_torrent = {
-                    "nombre": n, "tamano": tamano_total, "total_piezas": total, "hashes": hashes
+                torrent = {
+                    "nombre": n, "tamano": tamano_total, 
+                    "total_piezas": total, "hashes": hashes
                 }
                 
-                ruta_json = os.path.join(CARPETA_METADATOS, f"{n}.json")
-                with open(ruta_json, "w") as f:
-                    json.dump(datos_torrent, f, indent=4)
-
-                total_fragmentos_por_archivo[n] = total
-                archivos_compartiendo.append(n)
-                progreso_por_archivo[n] = 100
+                with open(os.path.join(CARPETA_METADATOS, f"{n}.json"), "w") as f:
+                    json.dump(torrent, f, indent=4)
+                
+                # Actualizar estado local y avisar al tracker
+                total_fragmentos_por_archivo[n], progreso_por_archivo[n] = total, 100
+                if n not in archivos_compartiendo: archivos_compartiendo.append(n)
                 anunciar_tracker(ip_t, mi_p)
-                console.print(f"[green]Compartiendo {n} (Metadatos guardados en {CARPETA_METADATOS})[/green]")
-            else:
-                console.print("[red]No existe el archivo en /archivos[/red]")
+                console.print(f"[bold green]✔ JSON creado en /torrents y compartiendo {n}[/bold green]")
+            else: console.print("[red]No existe el archivo en /archivos[/red]")
 
         elif op == "2":
             lista = pedir_lista(ip_t)
-            print("Enjambre disponible:", lista)
-            n = input("Archivo: ")
-            fuentes = buscar_fuentes(ip_t, n)
-            if fuentes:
-                total = fuentes[0].get('total_fragmentos', 0)
-                if total > 0: descargar(ip_t, fuentes, n, total, mi_p)
-            else: console.print("[red]No hay fuentes (Seeders o Leechers > 20%).[/red]")
-
+            console.print(f"[bold cyan]Enjambre: {lista}[/bold cyan]")
+            if lista:
+                n = input("Archivo a descargar: ")
+                fuentes = buscar_fuentes(ip_t, n)
+                if fuentes: descargar(ip_t, fuentes, n, fuentes[0]['total_fragmentos'], mi_p)
         elif op == "3": os._exit(0)
 
 if __name__ == "__main__":
-    ip_tracker = input("IP Tracker: ")
-    puerto = int(input("Mi puerto: "))
-    threading.Thread(target=servidor_de_piezas, args=(puerto,), daemon=True).start()
-    
-    # Heartbeat cada 5 segundos para que la tabla sea fluida
+    ip_t = input("IP Tracker: ")
+    mi_p = int(input("Mi puerto: "))
+    threading.Thread(target=lambda: servidor_de_piezas(mi_p), daemon=True).start()
     def heartbeat():
-        while True: anunciar_tracker(ip_tracker, puerto); time.sleep(5)
+        while True: anunciar_tracker(ip_t, mi_p); time.sleep(5)
     threading.Thread(target=heartbeat, daemon=True).start()
-    
-    menu(ip_tracker, puerto)
+    menu(ip_t, mi_p)

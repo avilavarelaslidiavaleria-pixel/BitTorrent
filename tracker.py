@@ -66,19 +66,19 @@
 
 # if __name__ == "__main__": iniciar_tracker()
 
+
 import socket, threading, json, time
 from rich.console import Console
 from rich.table import Table
 
 # ================= CONFIGURACIÓN =================
-TIEMPO_LIMITE = 20  # Más tiempo para que no desaparezcan tan rápido
+TIEMPO_LIMITE = 20 
 PUERTO_TRACKER = 6000
 nodos_activos = {}
 lock = threading.Lock()
 console = Console()
 
 def mostrar_estado_red():
-    """Genera e imprime la tabla en el historial"""
     ahora = time.strftime('%H:%M:%S')
     table = Table(title=f"📊 ESTADO DEL ENJAMBRE - {ahora}", header_style="bold magenta")
     table.add_column("PEER (IP:PUERTO)", style="cyan")
@@ -87,16 +87,17 @@ def mostrar_estado_red():
     table.add_column("ARCHIVOS COMPARTIENDO", style="yellow")
     
     with lock:
-        # AUTO-LIMPIEZA: Solo borramos si de verdad ya no hay señal
         limite = time.time() - TIEMPO_LIMITE
         muertos = [nid for nid, info in nodos_activos.items() if info["ultima_vez"] < limite]
         for nid in muertos:
             del nodos_activos[nid]
-            console.print(f"[bold red][!] Nodo {nid} desconectado (Timeout)[/bold red]")
+            console.print(f"[bold red][!] Nodo {nid} desconectado[/bold red]")
 
         for nid, info in nodos_activos.items():
             prog = info.get("progreso", {})
-            estado = "[bold green]SEEDER[/bold green]" if all(p == 100 for p in prog.values()) and prog else "[bold yellow]LEECHER[/bold yellow]"
+            # SEEDER si tiene al menos un archivo al 100%
+            es_seeder = any(p == 100 for p in prog.values()) if prog else False
+            estado = "[bold green]SEEDER[/bold green]" if es_seeder else "[bold yellow]LEECHER[/bold yellow]"
             prog_txt = ", ".join([f"{a}:{p}%" for a, p in prog.items()])
             arch_txt = ", ".join(info.get("archivos_compartidos", []))
             table.add_row(nid, estado, prog_txt or "0%", arch_txt or "Ninguno")
@@ -108,28 +109,35 @@ def manejar_nodo(conn, addr):
         data = conn.recv(4096).decode("utf-8")
         if not data: return
         msg = json.loads(data)
+        tipo = msg.get("tipo")
         
-        if msg.get("tipo") == "REGISTRO":
-            # PRIORIDAD: Usar la IP que el nodo reporta como local (Tailscale)
+        if tipo == "REGISTRO":
             ip_a_usar = msg.get("ip_local", addr[0])
             nid = f"{ip_a_usar}:{msg['puerto']}"
-            
             with lock:
-                nuevo = nid not in nodos_activos
                 nodos_activos[nid] = {
                     "ip": ip_a_usar, "puerto": msg["puerto"],
                     "progreso": msg.get("progreso", {}),
                     "archivos_compartidos": msg.get("archivos_compartidos", []),
+                    "total_fragmentos": msg.get("total_fragmentos", {}),
                     "ultima_vez": time.time()
                 }
-            
-            if nuevo: console.print(f"[bold blue][+] Nuevo nodo en la red: {nid}[/bold blue]")
-            mostrar_estado_red() # Se imprime la tabla nueva sin borrar la anterior
+            mostrar_estado_red()
 
-        elif msg.get("tipo") == "BUSQUEDA":
+        elif tipo == "LISTAR_TODO":
+            # CORRECCIÓN: Obtener todos los archivos que tienen progreso registrado
+            with lock:
+                archivos = []
+                for info in nodos_activos.values():
+                    archivos.extend(info["progreso"].keys())
+                archivos = list(set(archivos)) # Eliminar duplicados
+            conn.send(json.dumps(archivos).encode("utf-8"))
+
+        elif tipo == "BUSQUEDA":
             archivo = msg.get("archivo")
             with lock:
-                encontrados = [{"ip": info["ip"], "puerto": info["puerto"], "total_fragmentos": info.get("total_fragmentos", {}).get(archivo, 0)} 
+                encontrados = [{"ip": info["ip"], "puerto": info["puerto"], 
+                                "total_fragmentos": info.get("total_fragmentos", {}).get(archivo, 0)} 
                                for info in nodos_activos.values() if info["progreso"].get(archivo, 0) >= 20]
             conn.send(json.dumps(encontrados).encode("utf-8"))
     except: pass
