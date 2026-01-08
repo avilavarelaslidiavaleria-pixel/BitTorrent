@@ -1,0 +1,82 @@
+GUIA DE INICIO 
+
+🔹 Read Before
+Antes de iniciar, asegúrate de tener instalado:
+* Python 3.8 o superior
+* Acceso a terminal
+* Conexión a internet
+* (Opcional) Acceso a la MV donde corre el tracker
+
+🔹 1. Crear estructura de carpetas
+Crear la carpeta principal del proyecto:
+
+mkdir BitTorrent
+Entrar a la carpeta:
+
+cd BitTorrent
+Crear las carpetas necesarias para el funcionamiento del sistema:
+
+mkdir archivos descargas torrents
+Estas carpetas se usan para:
+* archivos → archivos originales a compartir
+* descargas → archivos descargados por los peers
+* torrents → metadatos de los archivos
+
+🔹 2. Posicionarse en la carpeta del proyecto
+Si el proyecto se encuentra en el escritorio:
+
+cd Desktop/BitTorrent
+
+🔹 3. Levantar el Tracker
+El tracker se encarga de coordinar la comunicación entre los nodos (peers).
+📍 IP del Tracker
+
+18.224.179.159
+🔐 Acceder a la máquina virtual del tracker
+Desde la terminal local:
+
+ssh -i "LlaveTracker.pem" ubuntu@18.224.179.159
+📤 Copiar archivos al tracker
+Desde tu máquina local:
+
+scp -i "LlaveTracker.pem" tracker.py nodo.py ubuntu@18.224.179.159:/home/ubuntu/
+▶️ Ejecutar el tracker
+Dentro de la MV:
+
+python3 tracker.py
+🔍 Verificar puertos activos (opcional)
+
+sudo ss -tulnp | grep 50000
+sudo lsof -i :5000
+Si es necesario reiniciar la MV:
+
+sudo reboot
+
+🔹 4. Levantar los nodos (peers)
+El tercer paso es levantar los nodos para lograr la conexión entre ellos. Cada peer debe ejecutarse en un puerto distinto.
+Puertos recomendados:
+* 5000
+* 6000
+* Cualquier puerto entre 50000 y 50100
+▶️ Ejecutar un nodo
+
+python3 nodo.py
+Cuando el programa lo solicite:
+
+IP DEL TRACKER: 18.224.179.159
+Tu Puerto: 50001
+⚠️ Cada nodo debe usar un puerto diferente para evitar conflictos.
+
+🔹 5. Compartir o descargar archivos
+Coloca el archivo a compartir dentro de la carpeta archivos. Ejemplo:
+
+Navidad_Las_Alucines.mp4
+Los archivos descargados aparecerán automáticamente en la carpeta:
+
+descargas/
+
+🔹 Notas importantes
+* El sistema funciona de manera distribuida, no local.
+* El tracker solo coordina, no almacena archivos.
+* Los peers pueden actuar como seeders y leechers simultáneamente.
+* Se recomienda usar Tailscale o VPN si los nodos están en redes distintas.
